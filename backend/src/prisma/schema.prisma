@@ -1,0 +1,406 @@
+// Database tables for the Auto Week & Day Plan.
+// Field names are camelCase in JavaScript and snake_case in PostgreSQL (@map / @@map).
+//
+//   A. Masters        work_centers, machines, items
+//   B. Uploads        upload_batches, sales_order_lines, stock, pm_arrivals
+//   C. Plan results   plan_runs, week_plan_lines, week_plan_issues, day_plan_cells, production_actuals
+//   D. System         users, audit_log, app_settings
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- enums
+
+/// Planning logic of a machine line, chosen before each week's plan.
+enum LineLogic {
+  BLACK // all machines in the line run the SKU by the buyer's requested date
+  FLAVOUR // number of machines from the week plan blend, spread across the week
+  MIX_CARTON // each flavour fixed to one machine number
+  VARIETY // lowest to highest pending quantity, after deducting stock
+
+  @@map("line_logic")
+}
+
+enum Role {
+  ADMIN
+  PLANNER
+  SUPERVISOR
+
+  @@map("role")
+}
+
+enum UploadKind {
+  WORK_CENTERS
+  MACHINES
+  ITEMS
+  ORDERS
+  STOCK
+  PM_ARRIVALS
+  ACTUALS
+
+  @@map("upload_kind")
+}
+
+enum PlanKind {
+  WEEK
+  DAY
+
+  @@map("plan_kind")
+}
+
+enum PlanTrigger {
+  MANUAL
+  AUTO // Friday 05:00 scheduled run
+
+  @@map("plan_trigger")
+}
+
+enum PlanStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+
+  @@map("plan_status")
+}
+
+enum IssueKind {
+  HELD // production week: an SKU of the order has no material
+  UNPLANNED // no capacity within the plan horizon
+  LATER // ship date is beyond the plan horizon
+
+  @@map("issue_kind")
+}
+
+// ---------------------------------------------------------------- A. masters
+
+/// A machine line (work centre).
+model WorkCenter {
+  id              Int       @id @default(autoincrement())
+  code            String    @unique @db.VarChar(80)
+  zone            String    @default("") @db.VarChar(80)
+  logic           LineLogic @default(BLACK)
+  /// Tea bags per machine per minute.
+  capPerMin       Float     @default(0) @map("cap_per_min")
+  minutesPerShift Int       @default(570) @map("minutes_per_shift")
+  shiftsPerDay    Int       @default(2) @map("shifts_per_day")
+  daysPerWeek     Int       @default(6) @map("days_per_week")
+  /// Share of capacity the day plan books, 0..1 (week plan always uses 100%).
+  dayEfficiency   Float     @default(1) @map("day_efficiency")
+  /// Premix / Instant Tea: each change-over costs one day for cleaning.
+  changeoverDay   Boolean   @default(false) @map("changeover_day")
+  /// Constanta ENV: plan flavour by flavour to reduce change-overs.
+  flavourGrouping Boolean   @default(false) @map("flavour_grouping")
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  machines        Machine[]
+  defaultForItems Item[]           @relation("ItemDefaultWorkCenter")
+  lastForItems    Item[]           @relation("ItemLastWorkCenter")
+  salesOrderLines SalesOrderLine[]
+  weekPlanLines   WeekPlanLine[]
+  dayPlanCells    DayPlanCell[]
+
+  @@map("work_centers")
+}
+
+model Machine {
+  id           Int      @id @default(autoincrement())
+  workCenterId Int      @map("work_center_id")
+  machineNo    String   @map("machine_no") @db.VarChar(40)
+  sortOrder    Int      @default(0) @map("sort_order")
+  /// Overrides the line's capacity per minute when set.
+  capPerMin    Float?   @map("cap_per_min")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  workCenter        WorkCenter         @relation(fields: [workCenterId], references: [id])
+  dayPlanCells      DayPlanCell[]
+  productionActuals ProductionActual[]
+
+  @@unique([workCenterId, machineNo])
+  @@map("machines")
+}
+
+/// SKU master.
+model Item {
+  id                  Int      @id @default(autoincrement())
+  name                String   @unique @db.VarChar(200)
+  uom                 String   @default("CFC") @db.VarChar(10)
+  ctnPerCfc           Float    @default(1) @map("ctn_per_cfc")
+  tbgsPerCtn          Float    @default(1) @map("tbgs_per_ctn")
+  flavour             String   @default("") @db.VarChar(80)
+  teaType             String   @default("") @map("tea_type") @db.VarChar(40)
+  defaultWorkCenterId Int?     @map("default_work_center_id")
+  /// Routing used by the last week plan; preferred over the default line.
+  lastWorkCenterId    Int?     @map("last_work_center_id")
+  isVariety           Boolean  @default(false) @map("is_variety")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  defaultWorkCenter WorkCenter? @relation("ItemDefaultWorkCenter", fields: [defaultWorkCenterId], references: [id], onDelete: SetNull)
+  lastWorkCenter    WorkCenter? @relation("ItemLastWorkCenter", fields: [lastWorkCenterId], references: [id], onDelete: SetNull)
+
+  salesOrderLines   SalesOrderLine[]
+  stock             Stock?
+  pmArrivals        PmArrival[]
+  weekPlanLines     WeekPlanLine[]
+  weekPlanIssues    WeekPlanIssue[]
+  dayPlanCells      DayPlanCell[]
+  productionActuals ProductionActual[]
+
+  @@map("items")
+}
+
+// ---------------------------------------------------------------- B. uploads
+
+/// One row per Excel upload.
+model UploadBatch {
+  id           Int        @id @default(autoincrement())
+  kind         UploadKind
+  fileName     String     @map("file_name") @db.VarChar(255)
+  uploadedById Int?       @map("uploaded_by_id")
+  uploadedAt   DateTime   @default(now()) @map("uploaded_at")
+  rowsImported Int        @default(0) @map("rows_imported")
+  rowsRejected Int        @default(0) @map("rows_rejected")
+  /// [{ row, message }] for rejected rows.
+  errors       Json?
+
+  uploadedBy      User?            @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  salesOrderLines SalesOrderLine[]
+  stock           Stock[]
+  pmArrivals      PmArrival[]
+
+  @@index([kind, uploadedAt])
+  @@map("upload_batches")
+}
+
+/// Open sales order lines from the latest Order Status upload (each upload replaces the set).
+model SalesOrderLine {
+  id           Int       @id @default(autoincrement())
+  batchId      Int       @map("batch_id")
+  soNo         String    @map("so_no") @db.VarChar(60)
+  lineNo       String    @default("1") @map("line_no") @db.VarChar(20)
+  itemId       Int       @map("item_id")
+  qty          Float
+  /// Buyer requested ship date.
+  shipDate     DateTime? @map("ship_date") @db.Date
+  poDate       DateTime? @map("po_date") @db.Date
+  /// 1 = highest.
+  priority     Int?
+  /// Optional routing override for this order line.
+  workCenterId Int?      @map("work_center_id")
+
+  batch      UploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  item       Item        @relation(fields: [itemId], references: [id])
+  workCenter WorkCenter? @relation(fields: [workCenterId], references: [id], onDelete: SetNull)
+
+  @@unique([soNo, lineNo])
+  @@index([shipDate])
+  @@map("sales_order_lines")
+}
+
+/// Warehouse stock per SKU (each upload replaces the set).
+model Stock {
+  id          Int   @id @default(autoincrement())
+  batchId     Int   @map("batch_id")
+  itemId      Int   @unique @map("item_id")
+  /// Cases the warehouse packing material covers.
+  materialQty Float @default(0) @map("material_qty")
+  /// Finished-goods stock in cases (deducted for variety packs).
+  fgQty       Float @default(0) @map("fg_qty")
+
+  batch UploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  item  Item        @relation(fields: [itemId], references: [id])
+
+  @@map("stock")
+}
+
+/// Packing-material arrivals (each upload replaces the set).
+model PmArrival {
+  id          Int      @id @default(autoincrement())
+  batchId     Int      @map("batch_id")
+  itemId      Int      @map("item_id")
+  poNo        String   @default("") @map("po_no") @db.VarChar(60)
+  arrivalDate DateTime @map("arrival_date") @db.Date
+  qty         Float?
+
+  batch UploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  item  Item        @relation(fields: [itemId], references: [id])
+
+  @@index([itemId, arrivalDate])
+  @@map("pm_arrivals")
+}
+
+// ---------------------------------------------------------------- C. plan results
+
+/// Every week or day plan run.
+model PlanRun {
+  id               Int         @id @default(autoincrement())
+  kind             PlanKind
+  /// Monday of the production week.
+  weekStart        DateTime    @map("week_start") @db.Date
+  trigger          PlanTrigger @default(MANUAL)
+  status           PlanStatus  @default(RUNNING)
+  /// Line logics, PM weeks and other settings used, so old plans stay explainable.
+  settingsSnapshot Json?       @map("settings_snapshot")
+  note             String      @default("") @db.VarChar(400)
+  createdById      Int?        @map("created_by_id")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  finishedAt       DateTime?   @map("finished_at")
+
+  createdBy      User?           @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  weekPlanLines  WeekPlanLine[]
+  weekPlanIssues WeekPlanIssue[]
+  dayPlanCells   DayPlanCell[]
+
+  @@index([kind, weekStart])
+  @@map("plan_runs")
+}
+
+/// Week plan result: which order line is produced in which week.
+model WeekPlanLine {
+  id           Int       @id @default(autoincrement())
+  runId        Int       @map("run_id")
+  /// 0 = production week, 1.. = packing-material (PM) weeks.
+  weekIndex    Int       @map("week_index")
+  weekStart    DateTime  @map("week_start") @db.Date
+  // SO number and line are kept as text: open orders are replaced on every upload.
+  soNo         String    @map("so_no") @db.VarChar(60)
+  lineNo       String    @map("line_no") @db.VarChar(20)
+  itemId       Int       @map("item_id")
+  workCenterId Int       @map("work_center_id")
+  qty          Float
+  teaBags      Float     @map("tea_bags")
+  shipDate     DateTime? @map("ship_date") @db.Date
+  priority     Int?
+  reason       String    @default("") @db.VarChar(200)
+
+  run        PlanRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  item       Item       @relation(fields: [itemId], references: [id])
+  workCenter WorkCenter @relation(fields: [workCenterId], references: [id])
+
+  @@index([runId, weekIndex])
+  @@index([soNo])
+  @@map("week_plan_lines")
+}
+
+/// Orders the week plan could not place, with the reason.
+model WeekPlanIssue {
+  id     Int       @id @default(autoincrement())
+  runId  Int       @map("run_id")
+  soNo   String    @map("so_no") @db.VarChar(60)
+  itemId Int?      @map("item_id")
+  qty    Float     @default(0)
+  kind   IssueKind @default(UNPLANNED)
+  reason String    @db.VarChar(300)
+
+  run  PlanRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  item Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@map("week_plan_issues")
+}
+
+/// Day plan grid: line x machine x shift (a machine can run more than one SKU in a shift).
+model DayPlanCell {
+  id           Int    @id @default(autoincrement())
+  runId        Int    @map("run_id")
+  /// 0..11 = Mon A .. Sat B.
+  shiftIndex   Int    @map("shift_index")
+  workCenterId Int    @map("work_center_id")
+  machineId    Int    @map("machine_id")
+  /// Empty for idle / cleaning cells.
+  itemId       Int?   @map("item_id")
+  planned      Float  @default(0)
+  /// Shortfall carried from the same machine's previous shift.
+  carryIn      Float  @default(0) @map("carry_in")
+  /// Material to request = planned - carryIn (no new requisition for carried quantity).
+  requisition  Float  @default(0)
+  /// e.g. "Cleaning (Premix change-over)".
+  note         String @default("") @db.VarChar(120)
+
+  run        PlanRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  workCenter WorkCenter @relation(fields: [workCenterId], references: [id])
+  machine    Machine    @relation(fields: [machineId], references: [id])
+  item       Item?      @relation(fields: [itemId], references: [id])
+
+  @@index([runId, shiftIndex])
+  @@map("day_plan_cells")
+}
+
+/// Quantity actually produced. Kept apart from the plan so re-planning never erases actuals.
+model ProductionActual {
+  id          Int      @id @default(autoincrement())
+  weekStart   DateTime @map("week_start") @db.Date
+  shiftIndex  Int      @map("shift_index")
+  machineId   Int      @map("machine_id")
+  itemId      Int      @map("item_id")
+  produced    Float
+  enteredById Int?     @map("entered_by_id")
+  enteredAt   DateTime @default(now()) @map("entered_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  machine   Machine @relation(fields: [machineId], references: [id])
+  item      Item    @relation(fields: [itemId], references: [id])
+  enteredBy User?   @relation(fields: [enteredById], references: [id], onDelete: SetNull)
+
+  @@unique([weekStart, shiftIndex, machineId, itemId])
+  @@map("production_actuals")
+}
+
+// ---------------------------------------------------------------- D. system
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String   @db.VarChar(120)
+  email        String   @unique @db.VarChar(200)
+  passwordHash String   @map("password_hash") @db.VarChar(200)
+  role         Role     @default(PLANNER)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  uploads   UploadBatch[]
+  planRuns  PlanRun[]
+  actuals   ProductionActual[]
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+/// Who changed what and when.
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  userId    Int?     @map("user_id")
+  /// e.g. CREATE, UPDATE, DELETE, UPLOAD, RUN_PLAN, ENTER_ACTUAL.
+  action    String   @db.VarChar(40)
+  /// Table or area, e.g. work_centers.
+  entity    String   @db.VarChar(60)
+  entityId  String?  @map("entity_id") @db.VarChar(60)
+  before    Json?
+  after     Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+/// Key/value settings, e.g. pm_weeks = 4, auto_week_plan = on, last_auto_run.
+model AppSetting {
+  key       String   @id @db.VarChar(60)
+  value     String   @default("") @db.VarChar(400)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}

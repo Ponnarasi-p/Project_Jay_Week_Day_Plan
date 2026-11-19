@@ -4,15 +4,15 @@
   "private": true,
   "description": "Auto week and day plan for the tea-packing lines (React + Node + PostgreSQL)",
   "workspaces": [
-    "server",
-    "client"
+    "backend",
+    "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -n server,client -c yellow,cyan \"npm run dev -w server\" \"npm run dev -w client\"",
-    "build": "npm run build -w client",
-    "db:push": "npm run db:push -w server",
-    "db:migrate": "npm run db:migrate -w server",
-    "db:studio": "npm run db:studio -w server"
+    "dev": "concurrently -n backend,frontend -c yellow,cyan \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w frontend",
+    "db:validate": "npm run db:validate -w backend",
+    "db:migrate": "npm run db:migrate -w backend",
+    "db:studio": "npm run db:studio -w backend"
   },
   "devDependencies": {
     "concurrently": "^9.2.0"

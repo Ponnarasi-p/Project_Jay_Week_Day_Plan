@@ -12,12 +12,45 @@ Built with **React** (Vite), **Node** (Express) and **PostgreSQL** (Prisma).
 ## Project layout
 
 ```
-client/            React app (port 5173)
-  src/pages/         Overview, Machine lines, Uploads, Week plan, Day plan
-server/            Node + Express API (port 4000, all routes under /api)
-  prisma/            database tables (schema.prisma)
-  src/routes/        API routes
+backend/                 Node + Express API (port 4000, all routes under /api)
+  server.js                starts the server
+  scripts/                 one-off scripts (seed data, imports)
+  src/
+    app.js                 Express app: middlewares + routes
+    config/                settings from .env
+    constants/             enums, shift names, HTTP status codes
+    routes/                URL -> controller
+    controllers/           read the request, call a service, send the response
+    services/              business logic (planning engines are called from here)
+    repositories/          database queries per table
+    DAL/                   the Prisma database client
+    DTOs/                  request/response shapes
+    validators/            request validation
+    middlewares/           request logging, errors, auth
+    decorators/            wrappers for controllers (e.g. role checks)
+    helpers/               domain helpers (weeks, shifts, capacity)
+    utils/                 generic helpers
+    loggers/               logger; files written to src/logs/
+    prisma/                schema.prisma and migrations
+
+frontend/                React app (port 5173)
+  src/
+    main.jsx               entry point
+    app/                   App shell and one folder per screen (overview/, ...)
+    components/            layout/ (Header) and common/ (cards, dialogs)
+    config/                settings from .env
+    constants/             routes, tab list
+    hooks/                 data hooks (useHealth, ...)
+    lib/                   httpClient
+    services/              API calls per area
+    shared/                pieces shared between screens
+    store/                 app-wide state
+    styles/                globals.css
+    types/                 JSDoc type definitions
+    utils/                 formatting helpers
 ```
+
+Request flow in the backend: `routes -> controllers -> services -> repositories -> DAL (Prisma) -> PostgreSQL`.
 
 ## First-time setup
 
@@ -30,17 +63,17 @@ Requirements: Node 22+ and PostgreSQL running on this PC.
    npm install
    ```
 
-2. Create `server/.env` from the example and put your PostgreSQL password in `DATABASE_URL`:
+2. Create `backend/.env` from the example and put your PostgreSQL password in `DATABASE_URL`:
 
    ```powershell
-   copy server\.env.example server\.env
-   notepad server\.env
+   copy backend\.env.example backend\.env
+   notepad backend\.env
    ```
 
-3. Create the `weekplan` database and its tables:
+3. Create the `weekplan` database and its tables (first time, name the migration `init`):
 
    ```powershell
-   npm run db:push
+   npm run db:migrate
    ```
 
 4. Start the API and the React app together:
@@ -51,14 +84,26 @@ Requirements: Node 22+ and PostgreSQL running on this PC.
 
 Open http://localhost:5173. The Overview page shows whether the API server and PostgreSQL are connected.
 
-Other commands: `npm run db:studio` (browse the database), `npm run build` (production build of the client).
+Other commands: `npm run db:validate` (check the schema), `npm run db:studio` (browse the database),
+`npm run build` (production build of the frontend).
+
+## Database tables
+
+| Group | Tables |
+|---|---|
+| Masters | `work_centers`, `machines`, `items` |
+| Uploads | `upload_batches`, `sales_order_lines`, `stock`, `pm_arrivals` |
+| Plan results | `plan_runs`, `week_plan_lines`, `week_plan_issues`, `day_plan_cells`, `production_actuals` |
+| System | `users`, `audit_log`, `app_settings` |
+
+Defined in [`backend/src/prisma/schema.prisma`](backend/src/prisma/schema.prisma).
 
 ## Build plan
 
 | Step | Scope | Status |
 |---|---|---|
 | 1 | Project setup: React + Express + PostgreSQL connection | done |
-| 2 | Database tables: lines, machines, items, orders, stock, PM arrivals, plans, actuals | |
+| 2 | Database tables: lines, machines, items, orders, stock, PM arrivals, plans, actuals | done |
 | 3 | Machine lines and items: API and screen | |
 | 4 | Excel templates and uploads | |
 | 5 | Week plan engine with tests | |
